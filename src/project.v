@@ -7,7 +7,7 @@
 `default_nettype none
 
 
-module tt_um_Jan_three_body_solution(
+module tt_um_vga_example(
   input  wire [7:0] ui_in,    // Dedicated inputs
   output wire [7:0] uo_out,   // Dedicated outputs
   input  wire [7:0] uio_in,   // IOs: Input path
@@ -28,8 +28,6 @@ module tt_um_Jan_three_body_solution(
   wire video_active;
   wire [9:0] pix_x;
   wire [9:0] pix_y;
-  wire sound;
-
 
   // TinyVGA PMOD
   assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
@@ -58,20 +56,13 @@ module tt_um_Jan_three_body_solution(
   );
 
   // constants (frame-static points)
-  reg signed [9:0] AX = 10'sd300;
-  reg signed [9:0] AY = 10'sd150;
-  reg signed [9:0] BX = 10'sd420;
-  reg signed [9:0] BY = 10'sd300;
-  reg signed [9:0] CX = 10'sd200;
-  reg signed [9:0] CY = 10'sd20;
+  reg signed [9:0] AX, BX, CX;
+  reg signed [9:0] AY, BY, CY;
+
 
   // per-frame movement (pixels per frame)
-  reg signed [9:0] vAX = 0;
-  reg signed [9:0] vAY = 0;
-  reg signed [9:0] vBX = 0;
-  reg signed [9:0] vBY = 0;
-  reg signed [9:0] vCX = 0;
-  reg signed [9:0] vCY = 0;
+  reg signed [9:0] vAX, vBX, vCX;
+  reg signed [9:0] vAY, vBY, vCY;
 
 
   // calculate pixel to planet distance
@@ -165,49 +156,46 @@ module tt_um_Jan_three_body_solution(
     hitA ? 2'b01 :
     hitB ? 2'b10 :
     hitC ? 2'b11 : 2'b00;
-  
-
-
 
 
   //update planet positions each frame
   always @(posedge vsync or negedge rst_n) begin
-  if (!rst_n) begin
-    AX <= 10'sd300; AY <= 10'sd150;
-    BX <= 10'sd420; BY <= 10'sd300;
-    CX <= 10'sd200; CY <= 10'sd20;
-    counter <= 0;
-    vAX <= 0; vAY <= 0;
-    vBX <= 0; vBY <= 0;
-    vCX <= 0; vCY <= 0;
-  end else begin
-    // velocity update
-    vAX <= vAX + aAX;
-    vAY <= vAY + aAY;
-    vBX <= vBX + aBX;
-    vBY <= vBY + aBY;
-    vCX <= vCX + aCX;
-    vCY <= vCY + aCY;
+    if (!rst_n) begin
+      AX <= 10'sd300; AY <= 10'sd150;
+      BX <= 10'sd420; BY <= 10'sd300;
+      CX <= 10'sd200; CY <= 10'sd20;
+      counter <= 0;
+      vAX <= 0; vAY <= 0;
+      vBX <= 0; vBY <= 0;
+      vCX <= 0; vCY <= 0;
+    end else begin
+      // velocity update
+      vAX <= vAX + aAX;
+      vAY <= vAY + aAY;
+      vBX <= vBX + aBX;
+      vBY <= vBY + aBY;
+      vCX <= vCX + aCX;
+      vCY <= vCY + aCY;
 
-    //position update
-    AX <= AX + vAX;
-    AY <= AY + vAY;
-    BX <= BX + vBX;
-    BY <= BY + vBY;
-    CX <= CX + vCX;
-    CY <= CY + vCY;
-    counter <= counter + 1;
+      //position update
+      AX <= AX + vAX;
+      AY <= AY + vAY;
+      BX <= BX + vBX;
+      BY <= BY + vBY;
+      CX <= CX + vCX;
+      CY <= CY + vCY;
+      counter <= counter + 1;
+    end
   end
-end
 
 
 
   assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
 
 
-assign R = video_active ? R_pix : 2'b00;
-assign G = video_active ? G_pix : 2'b00;
-assign B = video_active ? B_pix : 2'b00;
+  assign R = video_active ? R_pix : 2'b00;
+  assign G = video_active ? G_pix : 2'b00;
+  assign B = video_active ? B_pix : 2'b00;
 
 
  
