@@ -22,28 +22,18 @@ module tt_um_Jan_three_body_solution(
   // VGA signals
   wire hsync;
   wire vsync;
-  wire [1:0] R;
-  wire [1:0] G;
-  wire [1:0] B;
+  wire [1:0] R, G, B;
   wire video_active;
   wire [9:0] pix_x;
   wire [9:0] pix_y;
 
-  // TinyVGA PMOD
+  // TinyVGA PMOD (ONLY ONCE)
   assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
 
+  assign uio_out = 8'b0;
+  assign uio_oe  = 8'b0;
 
-  // Unused outputs assigned to 0.
-  assign uio_out = 0;
-  assign uio_oe  = 0;
-
-
-  // Suppress unused signals warning
   wire _unused_ok = &{ena, ui_in, uio_in};
-
-
-  reg [9:0] counter;
-
 
   hvsync_generator hvsync_gen(
     .clk(clk),
@@ -55,92 +45,78 @@ module tt_um_Jan_three_body_solution(
     .vpos(pix_y)
   );
 
-  // constants (frame-static points)
-  reg signed [9:0] AX, BX, CX;
-  reg signed [9:0] AY, BY, CY;
+  // --- 320x240 logical coordinates (render/game resolution) ---
+  wire [8:0] pix_x320 = pix_x[9:1];   // 0..319
+  wire [7:0] pix_y240 = pix_y[9:1];   // 0..239
 
+  // once per frame
+  wire frame_tick = (pix_x == 10'd0) && (pix_y == 10'd0);
 
-  // per-frame movement (pixels per frame)
-  reg signed [9:0] vAX, vBX, vCX;
-  reg signed [9:0] vAY, vBY, vCY;
+  // --- positions stored at 320x240 ---
+  reg [8:0] AX, BX, CX;   // 0..319
+  reg [7:0] AY, BY, CY;   // 0..239
 
+  // --- velocities (smaller signed) ---
+  reg  signed [7:0] vAX, vBX, vCX;
+  reg  signed [7:0] vAY, vBY, vCY;
 
-  // calculate pixel to planet distance
-  wire signed [10:0] dxA = $signed({1'b0,pix_x}) - AX;
-  wire signed [10:0] dyA = $signed({1'b0,pix_y}) - AY;
-  wire signed [10:0] dxB = $signed({1'b0,pix_x}) - BX;
-  wire signed [10:0] dyB = $signed({1'b0,pix_y}) - BY;
-  wire signed [10:0] dxC = $signed({1'b0,pix_x}) - CX;
-  wire signed [10:0] dyC = $signed({1'b0,pix_y}) - CY;
+  // dx/dy at 320x240 (keep a sign bit)
+  wire signed [9:0] dxA = $signed({1'b0,pix_x320}) - $signed({1'b0,AX});
+  wire signed [8:0] dyA = $signed({1'b0,pix_y240}) - $signed({1'b0,AY});
+  wire signed [9:0] dxB = $signed({1'b0,pix_x320}) - $signed({1'b0,BX});
+  wire signed [8:0] dyB = $signed({1'b0,pix_y240}) - $signed({1'b0,BY});
+  wire signed [9:0] dxC = $signed({1'b0,pix_x320}) - $signed({1'b0,CX});
+  wire signed [8:0] dyC = $signed({1'b0,pix_y240}) - $signed({1'b0,CY});
 
-  //get absolute pixel planet distance
-  wire [10:0] ax = dxA[10] ? -dxA : dxA;
-  wire [10:0] ay = dyA[10] ? -dyA : dyA;
-  wire [10:0] bx = dxB[10] ? -dxB : dxB;
-  wire [10:0] by = dyB[10] ? -dyB : dyB;
-  wire [10:0] cx = dxC[10] ? -dxC : dxC;
-  wire [10:0] cy = dyC[10] ? -dyC : dyC;
+  // abs (smaller)
+  wire [9:0] ax = dxA[9] ? -dxA : dxA;
+  wire [8:0] ay = dyA[8] ? -dyA : dyA;
+  wire [9:0] bx = dxB[9] ? -dxB : dxB;
+  wire [8:0] by = dyB[8] ? -dyB : dyB;
+  wire [9:0] cx = dxC[9] ? -dxC : dxC;
+  wire [8:0] cy = dyC[8] ? -dyC : dyC;
 
-  // planet to planet distance
-  wire signed [10:0] ABx = BX - AX;
-  wire signed [10:0] ABy = BY - AY;
-  wire signed [10:0] ACx = CX - AX;
-  wire signed [10:0] ACy = CY - AY;
-  wire signed [10:0] BCx = CX - BX;
-  wire signed [10:0] BCy = CY - BY;
+  // planet-to-planet deltas in 320x240 space
+  wire signed [9:0] ABx = $signed({1'b0,BX}) - $signed({1'b0,AX});
+  wire signed [8:0] ABy = $signed({1'b0,BY}) - $signed({1'b0,AY});
+  wire signed [9:0] ACx = $signed({1'b0,CX}) - $signed({1'b0,AX});
+  wire signed [8:0] ACy = $signed({1'b0,CY}) - $signed({1'b0,AY});
+  wire signed [9:0] BCx = $signed({1'b0,CX}) - $signed({1'b0,BX});
+  wire signed [8:0] BCy = $signed({1'b0,CY}) - $signed({1'b0,BY});
 
-  //distance approximation
-  wire [10:0] ABd = (ABx[10] ? -ABx : ABx) + (ABy[10] ? -ABy : ABy);
-  wire [10:0] ACd = (ACx[10] ? -ACx : ACx) + (ACy[10] ? -ACy : ACy);
-  wire [10:0] BCd = (BCx[10] ? -BCx : BCx) + (BCy[10] ? -BCy : BCy);
+  // Manhattan distance approx (smaller)
+  wire [9:0] ABd = (ABx[9] ? -ABx : ABx) + (ABy[8] ? -ABy : ABy);
+  wire [9:0] ACd = (ACx[9] ? -ACx : ACx) + (ACy[8] ? -ACy : ACy);
+  wire [9:0] BCd = (BCx[9] ? -BCx : BCx) + (BCy[8] ? -BCy : BCy);
 
-  //force magnitude
-  wire signed [9:0] fAB =
-    (ABd < 11'd40) ? 10'sd2 :
-    (ABd < 11'd300) ? 10'sd1 :
-                    10'sd0;
+  // force magnitude (same idea, tweak thresholds if you want)
+  wire signed [7:0] fAB =
+    (ABd < 10'd20)  ? 8'sd2 :
+    (ABd < 10'd150) ? 8'sd1 :
+                      8'sd0;
 
-  wire signed [9:0] fAC =
-    (ACd < 11'd40) ? 10'sd2 :
-    (ACd < 11'd200) ? 10'sd1 :
-                    10'sd0;
+  wire signed [7:0] fAC =
+    (ACd < 10'd20)  ? 8'sd2 :
+    (ACd < 10'd100) ? 8'sd1 :
+                      8'sd0;
 
-  wire signed [9:0] fBC =
-    (BCd < 11'd40) ? 10'sd2 :
-    (BCd < 11'd200) ? 10'sd1 :
-                    10'sd0;
+  wire signed [7:0] fBC =
+    (BCd < 10'd20)  ? 8'sd2 :
+    (BCd < 10'd100) ? 8'sd1 :
+                      8'sd0;
 
-  //acceleration
-  wire signed [9:0] aAX =
-    (ABx[10] ? -fAB : fAB) +
-    (ACx[10] ? -fAC : fAC);
+  // accelerations (small signed)
+  wire signed [7:0] aAX = (ABx[9] ? -fAB : fAB) + (ACx[9] ? -fAC : fAC);
+  wire signed [7:0] aAY = (ABy[8] ? -fAB : fAB) + (ACy[8] ? -fAC : fAC);
+  wire signed [7:0] aBX = (ABx[9] ?  fAB : -fAB) + (BCx[9] ? -fBC :  fBC);
+  wire signed [7:0] aBY = (ABy[8] ?  fAB : -fAB) + (BCy[8] ? -fBC :  fBC);
+  wire signed [7:0] aCX = (ACx[9] ?  fAC : -fAC) + (BCx[9] ?  fBC : -fBC);
+  wire signed [7:0] aCY = (ACy[8] ?  fAC : -fAC) + (BCy[8] ?  fBC : -fBC);
 
-  wire signed [9:0] aAY =
-    (ABy[10] ? -fAB : fAB) +
-    (ACy[10] ? -fAC : fAC);
-
-  wire signed [9:0] aBX =
-    (ABx[10] ?  fAB : -fAB) +
-    (BCx[10] ? -fBC :  fBC);
-
-  wire signed [9:0] aBY =
-    (ABy[10] ?  fAB : -fAB) +
-    (BCy[10] ? -fBC :  fBC);
-
-  wire signed [9:0] aCX =
-    (ACx[10] ?  fAC : -fAC) +
-    (BCx[10] ?  fBC : -fBC);
-
-  wire signed [9:0] aCY =
-    (ACy[10] ?  fAC : -fAC) +
-    (BCy[10] ?  fBC : -fBC);
-
-
-
-  //check if pixel is supposed to be planet
-  wire hitA = (ax < 11'd20) && (ay < 11'd20) && ((ax + ay) < 12'd25);
-  wire hitB = (bx < 11'd20) && (by < 11'd20) && ((bx + by) < 12'd25);
-  wire hitC = (cx < 11'd20) && (cy < 11'd20) && ((cx + cy) < 12'd25);
+  // hit test in 320x240 space (you can shrink radius too if you want)
+  wire hitA = (ax < 10'd10) && (ay < 9'd10) && ((ax + ay) < 11'd13);
+  wire hitB = (bx < 10'd10) && (by < 9'd10) && ((bx + by) < 11'd13);
+  wire hitC = (cx < 10'd10) && (cy < 9'd10) && ((cx + cy) < 11'd13);
 
   wire [1:0] R_pix =
     hitA ? 2'b11 :
@@ -157,46 +133,32 @@ module tt_um_Jan_three_body_solution(
     hitB ? 2'b10 :
     hitC ? 2'b11 : 2'b00;
 
-
-  //update planet positions each frame
-  always @(posedge vsync or negedge rst_n) begin
+  // position update (with simple wrap to stay in range)
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      AX <= 10'sd300; AY <= 10'sd150;
-      BX <= 10'sd420; BY <= 10'sd300;
-      CX <= 10'sd200; CY <= 10'sd20;
-      counter <= 0;
+      AX <= 9'd150; AY <= 8'd75;
+      BX <= 9'd210; BY <= 8'd150;
+      CX <= 9'd100; CY <= 8'd10;
       vAX <= 0; vAY <= 0;
       vBX <= 0; vBY <= 0;
       vCX <= 0; vCY <= 0;
-    end else begin
-      // velocity update
-      vAX <= vAX + aAX;
-      vAY <= vAY + aAY;
-      vBX <= vBX + aBX;
-      vBY <= vBY + aBY;
-      vCX <= vCX + aCX;
-      vCY <= vCY + aCY;
+    end else if (frame_tick) begin
+      vAX <= vAX + aAX;  vAY <= vAY + aAY;
+      vBX <= vBX + aBX;  vBY <= vBY + aBY;
+      vCX <= vCX + aCX;  vCY <= vCY + aCY;
 
-      //position update
+      // unsigned wrap-around (cheap). If you prefer bounce/clamp, say so.
       AX <= AX + vAX;
       AY <= AY + vAY;
       BX <= BX + vBX;
       BY <= BY + vBY;
       CX <= CX + vCX;
       CY <= CY + vCY;
-      counter <= counter + 1;
     end
   end
-
-
-
-  assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
-
 
   assign R = video_active ? R_pix : 2'b00;
   assign G = video_active ? G_pix : 2'b00;
   assign B = video_active ? B_pix : 2'b00;
 
-
- 
 endmodule
