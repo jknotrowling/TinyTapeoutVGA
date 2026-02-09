@@ -102,8 +102,8 @@ module tt_um_Jan_three_body_solution(
   reg [7:0] AY, BY, CY;     // Y: 0..239
 
   // Velocities: small signed (area saver)
-  reg signed [7:0] vAX, vBX, vCX;
-  reg signed [7:0] vAY, vBY, vCY;
+  reg signed [4:0] vAX, vBX, vCX;
+  reg signed [4:0] vAY, vBY, vCY;
 
   // optional debug counter (can remove to save a few flops)
   reg [9:0] counter;
