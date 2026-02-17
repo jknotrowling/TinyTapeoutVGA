@@ -24,7 +24,7 @@ module tt_um_Jan_three_body_solution(
   input  wire       rst_n
 );
 
-  // VGA timing signals
+    // VGA timing signals
   wire hsync, vsync, video_active;
   wire [9:0] pix_x, pix_y;
 
@@ -172,27 +172,41 @@ module gravity (
   input  wire       rst_n,
   input  wire       frame_tick,
   input  wire       blanking,
-  output reg signed [9:0] AX, AY,
-  output reg signed [9:0] BX, BY,
-  output reg signed [9:0] CX, CY
+  output wire signed [9:0] AX, AY,
+  output wire signed [9:0] BX, BY,
+  output wire signed [9:0] CX, CY
 );
 
-  // --- Initial positions (screen-center triangle) ---
-  localparam signed [9:0] INIT_AX = 10'sd270, INIT_AY = 10'sd200;
-  localparam signed [9:0] INIT_BX = 10'sd370, INIT_BY = 10'sd280;
-  localparam signed [9:0] INIT_CX = 10'sd320, INIT_CY = 10'sd160;
+  // --- Initial positions (13-bit fixed point: 10 integer + 3 fractional) ---
+  localparam signed [12:0] INIT_AX = {10'sd270, 3'b0};
+  localparam signed [12:0] INIT_AY = {10'sd200, 3'b0};
+  localparam signed [12:0] INIT_BX = {10'sd370, 3'b0};
+  localparam signed [12:0] INIT_BY = {10'sd280, 3'b0};
+  localparam signed [12:0] INIT_CX = {10'sd320, 3'b0};
+  localparam signed [12:0] INIT_CY = {10'sd160, 3'b0};
 
   // Number of planet pairs × 2 axes = 12 micro-steps (pairs: AB AC BA BC CA CB)
   localparam [2:0] NUM_PAIRS    = 3'd6;
   localparam [2:0] LAST_PAIR    = 3'd5;
 
-  // --- Planet velocities (signed 5-bit, wraps on overflow) ---
-  reg signed [4:0] vel [0:2][0:1];  // vel[planet][axis]: 0=X, 1=Y
+  // --- Internal positions: 13-bit signed fixed point (10.3) ---
+  reg signed [12:0] pAX, pAY, pBX, pBY, pCX, pCY;
+
+  // --- Output integer positions (upper 10 bits) ---
+  assign AX = pAX[12:3];
+  assign AY = pAY[12:3];
+  assign BX = pBX[12:3];
+  assign BY = pBY[12:3];
+  assign CX = pCX[12:3];
+  assign CY = pCY[12:3];
+
+  // --- Planet velocities (signed 6-bit: 3 integer + 3 fractional) ---
+  reg signed [5:0] vel [0:2][0:1];  // vel[planet][axis]: 0=X, 1=Y
 
   // --- Sweep state machine ---
   reg [2:0] rel;           // current pair index (0..5)
   reg       axis;          // current axis: 0=X, 1=Y
-  reg       sweep_active; // high during the 12-step gravity sweep each frame
+  reg       sweep_active;  // high during the 12-step gravity sweep each frame
 
   wire do_step = blanking && sweep_active;
 
@@ -212,17 +226,17 @@ module gravity (
                                     2'd1;     // CB -> Q=B
 
   // ---------------------------------------------------------------------------
-  // Position muxes using planet indices
+  // Position muxes using planet indices (use integer part for gravity calc)
   // ---------------------------------------------------------------------------
-  wire signed [9:0] pos [0:2][0:1];
-  assign pos[0][0] = AX;  assign pos[0][1] = AY;
-  assign pos[1][0] = BX;  assign pos[1][1] = BY;
-  assign pos[2][0] = CX;  assign pos[2][1] = CY;
+  wire signed [9:0] pos_int [0:2][0:1];
+  assign pos_int[0][0] = AX;  assign pos_int[0][1] = AY;
+  assign pos_int[1][0] = BX;  assign pos_int[1][1] = BY;
+  assign pos_int[2][0] = CX;  assign pos_int[2][1] = CY;
 
-  wire signed [9:0] PX = pos[p_idx][0];
-  wire signed [9:0] PY = pos[p_idx][1];
-  wire signed [9:0] QX = pos[q_idx][0];
-  wire signed [9:0] QY = pos[q_idx][1];
+  wire signed [9:0] PX = pos_int[p_idx][0];
+  wire signed [9:0] PY = pos_int[p_idx][1];
+  wire signed [9:0] QX = pos_int[q_idx][0];
+  wire signed [9:0] QY = pos_int[q_idx][1];
 
   // ---------------------------------------------------------------------------
   // Gravity vector computation
@@ -241,55 +255,52 @@ module gravity (
   wire [10:0] manhattan = abs_dx + abs_dy;
 
   // Gravity magnitude lookup: closer planets pull harder.
-  // Uses MSB checks as power-of-two threshold approximation.
-  // Priority encoding from farthest to nearest:
-  //   bit 10 or 9 set -> very far  (amag=5)
-  //   bit 8 set       -> far       (amag=4)
-  //   bit 7 set       -> medium    (amag=3)
-  //   bit 6 set       -> close     (amag=2)
-  //   bit 5 set       -> very close(amag=1)
-  //   otherwise        -> collision (amag=0, no force)
-  wire [2:0] amag = |manhattan[10:9] ? 3'd5 :
-                      manhattan[8]   ? 3'd4 :
-                      manhattan[7]   ? 3'd3 :
-                      manhattan[6]   ? 3'd2 :
-                      manhattan[5]   ? 3'd1 : 3'd0;
+  // Reduced magnitudes for smoother motion with sub-pixel precision.
+  // Values are now in 1/8 pixel units (3 fractional bits).
+  //   bit 10-8 set -> very far  (amag=2)
+  //   bit 7 set    -> far       (amag=1)
+  //   bit 6 set    -> medium    (amag=1)
+  //   otherwise    -> close/collision (amag=0, minimal force)
+  wire [1:0] amag = |manhattan[10:8] ? 2'd2 :
+                      manhattan[7]   ? 2'd1 :
+                      manhattan[6]   ? 2'd1 : 2'd0;
 
   // Convert magnitude to signed velocity delta pointing from P toward Q
+  // Uses XOR+add for branchless sign application (minimal gates)
   wire sx = dx[10];
   wire sy = dy[10];
-  wire signed [4:0] dvx = $signed(({2'b0, amag} ^ {5{sx}})) + $signed({4'd0, sx});
-  wire signed [4:0] dvy = $signed(({2'b0, amag} ^ {5{sy}})) + $signed({4'd0, sy});
+  wire signed [5:0] dvx = $signed(({4'b0, amag} ^ {6{sx}})) + $signed({5'd0, sx});
+  wire signed [5:0] dvy = $signed(({4'b0, amag} ^ {6{sy}})) + $signed({5'd0, sy});
 
   // Select current velocity and delta for active axis
-  wire signed [4:0] v_in  = axis ? vel[p_idx][1] : vel[p_idx][0];
-  wire signed [4:0] dv_in = axis ? dvy : dvx;
+  wire signed [5:0] v_in  = axis ? vel[p_idx][1] : vel[p_idx][0];
+  wire signed [5:0] dv_in = axis ? dvy : dvx;
 
   // New velocity = old velocity + gravitational acceleration
-  wire signed [4:0] v_out = v_in + dv_in;
+  wire signed [5:0] v_out = v_in + dv_in;
 
   // ---------------------------------------------------------------------------
-  // Sign-extended velocity for position update
+  // Sign-extended velocity for position update (6-bit -> 13-bit)
   // ---------------------------------------------------------------------------
-  wire signed [9:0] vAX_ext = {{5{vel[0][0][4]}}, vel[0][0]};
-  wire signed [9:0] vAY_ext = {{5{vel[0][1][4]}}, vel[0][1]};
-  wire signed [9:0] vBX_ext = {{5{vel[1][0][4]}}, vel[1][0]};
-  wire signed [9:0] vBY_ext = {{5{vel[1][1][4]}}, vel[1][1]};
-  wire signed [9:0] vCX_ext = {{5{vel[2][0][4]}}, vel[2][0]};
-  wire signed [9:0] vCY_ext = {{5{vel[2][1][4]}}, vel[2][1]};
+  wire signed [12:0] vAX_ext = {{7{vel[0][0][5]}}, vel[0][0]};
+  wire signed [12:0] vAY_ext = {{7{vel[0][1][5]}}, vel[0][1]};
+  wire signed [12:0] vBX_ext = {{7{vel[1][0][5]}}, vel[1][0]};
+  wire signed [12:0] vBY_ext = {{7{vel[1][1][5]}}, vel[1][1]};
+  wire signed [12:0] vCX_ext = {{7{vel[2][0][5]}}, vel[2][0]};
+  wire signed [12:0] vCY_ext = {{7{vel[2][1][5]}}, vel[2][1]};
 
   // ---------------------------------------------------------------------------
   // Sequential logic
   // ---------------------------------------------------------------------------
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      AX <= INIT_AX;  AY <= INIT_AY;
-      BX <= INIT_BX;  BY <= INIT_BY;
-      CX <= INIT_CX;  CY <= INIT_CY;
+      pAX <= INIT_AX;  pAY <= INIT_AY;
+      pBX <= INIT_BX;  pBY <= INIT_BY;
+      pCX <= INIT_CX;  pCY <= INIT_CY;
 
-      vel[0][0] <= 5'sd0;  vel[0][1] <= 5'sd0;
-      vel[1][0] <= 5'sd0;  vel[1][1] <= 5'sd0;
-      vel[2][0] <= 5'sd0;  vel[2][1] <= 5'sd0;
+      vel[0][0] <= 6'sd0;  vel[0][1] <= 6'sd0;
+      vel[1][0] <= 6'sd0;  vel[1][1] <= 6'sd0;
+      vel[2][0] <= 6'sd0;  vel[2][1] <= 6'sd0;
 
       rel          <= 3'd0;
       axis         <= 1'b0;
@@ -299,12 +310,12 @@ module gravity (
       // At the start of each frame: apply velocities to positions,
       // then arm the 12-step gravity sweep for this frame
       if (frame_tick) begin
-        AX <= AX + vAX_ext;
-        AY <= AY + vAY_ext;
-        BX <= BX + vBX_ext;
-        BY <= BY + vBY_ext;
-        CX <= CX + vCX_ext;
-        CY <= CY + vCY_ext;
+        pAX <= pAX + vAX_ext;
+        pAY <= pAY + vAY_ext;
+        pBX <= pBX + vBX_ext;
+        pBY <= pBY + vBY_ext;
+        pCX <= pCX + vCX_ext;
+        pCY <= pCY + vCY_ext;
 
         rel          <= 3'd0;
         axis         <= 1'b0;
