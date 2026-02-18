@@ -24,7 +24,7 @@ module tt_um_Jan_three_body_solution(
   input  wire       rst_n
 );
 
-    // VGA timing signals
+  // VGA timing signals
   wire hsync, vsync, video_active;
   wire [9:0] pix_x, pix_y;
 
@@ -93,8 +93,6 @@ endmodule
 // =============================================================================
 // Shared utility: branchless absolute value via XOR+add
 // =============================================================================
-// Cannot use `function` in purely combinational context for all synth tools,
-// so we use a small helper module instead for maximum portability.
 module abs11 (
   input  wire signed [10:0] val,
   output wire        [10:0] result
@@ -201,7 +199,7 @@ module gravity (
   assign CY = pCY[12:3];
 
   // --- Planet velocities (signed 6-bit: 3 integer + 3 fractional) ---
-  reg signed [5:0] vel [0:2][0:1];  // vel[planet][axis]: 0=X, 1=Y
+  reg signed [5:0] vAX, vAY, vBX, vBY, vCX, vCY;
 
   // --- Sweep state machine ---
   reg [2:0] rel;           // current pair index (0..5)
@@ -228,15 +226,10 @@ module gravity (
   // ---------------------------------------------------------------------------
   // Position muxes using planet indices (use integer part for gravity calc)
   // ---------------------------------------------------------------------------
-  wire signed [9:0] pos_int [0:2][0:1];
-  assign pos_int[0][0] = AX;  assign pos_int[0][1] = AY;
-  assign pos_int[1][0] = BX;  assign pos_int[1][1] = BY;
-  assign pos_int[2][0] = CX;  assign pos_int[2][1] = CY;
-
-  wire signed [9:0] PX = pos_int[p_idx][0];
-  wire signed [9:0] PY = pos_int[p_idx][1];
-  wire signed [9:0] QX = pos_int[q_idx][0];
-  wire signed [9:0] QY = pos_int[q_idx][1];
+  wire signed [9:0] PX = (p_idx == 2'd0) ? AX : (p_idx == 2'd1) ? BX : CX;
+  wire signed [9:0] PY = (p_idx == 2'd0) ? AY : (p_idx == 2'd1) ? BY : CY;
+  wire signed [9:0] QX = (q_idx == 2'd0) ? AX : (q_idx == 2'd1) ? BX : CX;
+  wire signed [9:0] QY = (q_idx == 2'd0) ? AY : (q_idx == 2'd1) ? BY : CY;
 
   // ---------------------------------------------------------------------------
   // Gravity vector computation
@@ -255,39 +248,40 @@ module gravity (
   wire [10:0] manhattan = abs_dx + abs_dy;
 
   // Gravity magnitude lookup: closer planets pull harder.
-  // Reduced magnitudes for smoother motion with sub-pixel precision.
-  // Values are now in 1/8 pixel units (3 fractional bits).
-  //   bit 10-8 set -> very far  (amag=2)
-  //   bit 7 set    -> far       (amag=1)
-  //   bit 6 set    -> medium    (amag=1)
-  //   otherwise    -> close/collision (amag=0, minimal force)
+  // Values are in 1/8 pixel units (3 fractional bits).
   wire [1:0] amag = |manhattan[10:8] ? 2'd2 :
                       manhattan[7]   ? 2'd1 :
                       manhattan[6]   ? 2'd1 : 2'd0;
 
   // Convert magnitude to signed velocity delta pointing from P toward Q
-  // Uses XOR+add for branchless sign application (minimal gates)
   wire sx = dx[10];
   wire sy = dy[10];
   wire signed [5:0] dvx = $signed(({4'b0, amag} ^ {6{sx}})) + $signed({5'd0, sx});
   wire signed [5:0] dvy = $signed(({4'b0, amag} ^ {6{sy}})) + $signed({5'd0, sy});
 
   // Select current velocity and delta for active axis
-  wire signed [5:0] v_in  = axis ? vel[p_idx][1] : vel[p_idx][0];
+  wire signed [5:0] v_in  = axis ? ((p_idx == 2'd0) ? vAY : (p_idx == 2'd1) ? vBY : vCY)
+                                 : ((p_idx == 2'd0) ? vAX : (p_idx == 2'd1) ? vBX : vCX);
   wire signed [5:0] dv_in = axis ? dvy : dvx;
 
-  // New velocity = old velocity + gravitational acceleration
-  wire signed [5:0] v_out = v_in + dv_in;
+  // New velocity = old velocity + gravitational acceleration (with overflow detection)
+  wire signed [6:0] v_sum = {v_in[5], v_in} + {dv_in[5], dv_in};  // 7-bit to catch overflow
+
+  // Clamp to 6-bit signed range: -32 to +31
+  wire overflow_pos = ~v_sum[6] && v_sum[5];   // positive overflow: sum positive but bit 5 set
+  wire overflow_neg = v_sum[6] && ~v_sum[5];   // negative overflow: sum negative but bit 5 clear
+  wire signed [5:0] v_out = overflow_pos ? 6'sd31 :
+                            overflow_neg ? -6'sd32 : v_sum[5:0];
 
   // ---------------------------------------------------------------------------
   // Sign-extended velocity for position update (6-bit -> 13-bit)
   // ---------------------------------------------------------------------------
-  wire signed [12:0] vAX_ext = {{7{vel[0][0][5]}}, vel[0][0]};
-  wire signed [12:0] vAY_ext = {{7{vel[0][1][5]}}, vel[0][1]};
-  wire signed [12:0] vBX_ext = {{7{vel[1][0][5]}}, vel[1][0]};
-  wire signed [12:0] vBY_ext = {{7{vel[1][1][5]}}, vel[1][1]};
-  wire signed [12:0] vCX_ext = {{7{vel[2][0][5]}}, vel[2][0]};
-  wire signed [12:0] vCY_ext = {{7{vel[2][1][5]}}, vel[2][1]};
+  wire signed [12:0] vAX_ext = {{7{vAX[5]}}, vAX};
+  wire signed [12:0] vAY_ext = {{7{vAY[5]}}, vAY};
+  wire signed [12:0] vBX_ext = {{7{vBX[5]}}, vBX};
+  wire signed [12:0] vBY_ext = {{7{vBY[5]}}, vBY};
+  wire signed [12:0] vCX_ext = {{7{vCX[5]}}, vCX};
+  wire signed [12:0] vCY_ext = {{7{vCY[5]}}, vCY};
 
   // ---------------------------------------------------------------------------
   // Sequential logic
@@ -298,9 +292,9 @@ module gravity (
       pBX <= INIT_BX;  pBY <= INIT_BY;
       pCX <= INIT_CX;  pCY <= INIT_CY;
 
-      vel[0][0] <= 6'sd0;  vel[0][1] <= 6'sd0;
-      vel[1][0] <= 6'sd0;  vel[1][1] <= 6'sd0;
-      vel[2][0] <= 6'sd0;  vel[2][1] <= 6'sd0;
+      vAX <= 6'sd0;  vAY <= 6'sd0;
+      vBX <= 6'sd0;  vBY <= 6'sd0;
+      vCX <= 6'sd0;  vCY <= 6'sd0;
 
       rel          <= 3'd0;
       axis         <= 1'b0;
@@ -325,7 +319,12 @@ module gravity (
       // Execute one gravity micro-step per blanking clock cycle
       if (do_step) begin
         // Write updated velocity back to planet P's register
-        vel[p_idx][axis] <= v_out;
+        case (p_idx)
+          2'd0: if (!axis) vAX <= v_out; else vAY <= v_out;
+          2'd1: if (!axis) vBX <= v_out; else vBY <= v_out;
+          2'd2: if (!axis) vCX <= v_out; else vCY <= v_out;
+          default: ;
+        endcase
 
         // Advance sweep: X->Y for same pair, then next pair
         if (rel == LAST_PAIR && axis) begin
