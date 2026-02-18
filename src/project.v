@@ -175,13 +175,14 @@ module gravity (
   output wire signed [9:0] CX, CY
 );
 
-  // --- Initial positions (13-bit fixed point: 10 integer + 3 fractional) ---
-  localparam signed [12:0] INIT_AX = {10'sd270, 3'b0};
-  localparam signed [12:0] INIT_AY = {10'sd200, 3'b0};
-  localparam signed [12:0] INIT_BX = {10'sd370, 3'b0};
-  localparam signed [12:0] INIT_BY = {10'sd280, 3'b0};
-  localparam signed [12:0] INIT_CX = {10'sd320, 3'b0};
-  localparam signed [12:0] INIT_CY = {10'sd160, 3'b0};
+  // --- Initial positions: equilateral triangle centered on screen (640x480) ---
+  // Manhattan distances: A-B ≈ 230, A-C ≈ 230, B-C ≈ 180 → all in amag=1 zone
+  localparam signed [12:0] INIT_AX = {10'sd320, 3'b0};  // top center
+  localparam signed [12:0] INIT_AY = {10'sd160, 3'b0};
+  localparam signed [12:0] INIT_BX = {10'sd230, 3'b0};  // bottom left
+  localparam signed [12:0] INIT_BY = {10'sd300, 3'b0};
+  localparam signed [12:0] INIT_CX = {10'sd410, 3'b0};  // bottom right
+  localparam signed [12:0] INIT_CY = {10'sd300, 3'b0};
 
   // Number of planet pairs × 2 axes = 12 micro-steps (pairs: AB AC BA BC CA CB)
   localparam [2:0] NUM_PAIRS    = 3'd6;
@@ -198,8 +199,8 @@ module gravity (
   assign CX = pCX[12:3];
   assign CY = pCY[12:3];
 
-  // --- Planet velocities (signed 6-bit: 3 integer + 3 fractional) ---
-  reg signed [5:0] vAX, vAY, vBX, vBY, vCX, vCY;
+  // --- Planet velocities (signed 8-bit: 5 integer + 3 fractional) ---
+  reg signed [7:0] vAX, vAY, vBX, vBY, vCX, vCY;
 
   // --- Sweep state machine ---
   reg [2:0] rel;           // current pair index (0..5)
@@ -247,41 +248,43 @@ module gravity (
   // Manhattan distance |dx|+|dy| between P and Q
   wire [10:0] manhattan = abs_dx + abs_dy;
 
-  // Gravity magnitude lookup: closer planets pull harder.
+  // Gravity magnitude lookup: closer planets pull harder (1/r approximation).
+  // 3-bit amag → 4 force levels; capped to prevent Euler-integrator blow-up.
   // Values are in 1/8 pixel units (3 fractional bits).
-  wire [1:0] amag = |manhattan[10:8] ? 2'd2 :
-                      manhattan[7]   ? 2'd1 :
-                      manhattan[6]   ? 2'd1 : 2'd0;
+  wire [2:0] amag = |manhattan[10:8] ? 3'd0 :  // > 255 px: no force
+                      manhattan[7]   ? 3'd2 :  // 128-255 px: weak  (0.25 px/f²)
+                      manhattan[6]   ? 3'd4 :  // 64-127 px:  medium (0.50 px/f²)
+                                      3'd6;   // < 64 px:    strong (0.75 px/f²)
 
   // Convert magnitude to signed velocity delta pointing from P toward Q
   wire sx = dx[10];
   wire sy = dy[10];
-  wire signed [5:0] dvx = $signed(({4'b0, amag} ^ {6{sx}})) + $signed({5'd0, sx});
-  wire signed [5:0] dvy = $signed(({4'b0, amag} ^ {6{sy}})) + $signed({5'd0, sy});
+  wire signed [7:0] dvx = $signed(({5'b0, amag} ^ {8{sx}})) + $signed({7'd0, sx});
+  wire signed [7:0] dvy = $signed(({5'b0, amag} ^ {8{sy}})) + $signed({7'd0, sy});
 
   // Select current velocity and delta for active axis
-  wire signed [5:0] v_in  = axis ? ((p_idx == 2'd0) ? vAY : (p_idx == 2'd1) ? vBY : vCY)
+  wire signed [7:0] v_in  = axis ? ((p_idx == 2'd0) ? vAY : (p_idx == 2'd1) ? vBY : vCY)
                                  : ((p_idx == 2'd0) ? vAX : (p_idx == 2'd1) ? vBX : vCX);
-  wire signed [5:0] dv_in = axis ? dvy : dvx;
+  wire signed [7:0] dv_in = axis ? dvy : dvx;
 
   // New velocity = old velocity + gravitational acceleration (with overflow detection)
-  wire signed [6:0] v_sum = {v_in[5], v_in} + {dv_in[5], dv_in};  // 7-bit to catch overflow
+  wire signed [8:0] v_sum = {v_in[7], v_in} + {dv_in[7], dv_in};  // 9-bit to catch overflow
 
-  // Clamp to 6-bit signed range: -32 to +31
-  wire overflow_pos = ~v_sum[6] && v_sum[5];   // positive overflow: sum positive but bit 5 set
-  wire overflow_neg = v_sum[6] && ~v_sum[5];   // negative overflow: sum negative but bit 5 clear
-  wire signed [5:0] v_out = overflow_pos ? 6'sd31 :
-                            overflow_neg ? -6'sd32 : v_sum[5:0];
+  // Clamp to 8-bit signed range: -128 to +127
+  wire overflow_pos = ~v_sum[8] && v_sum[7];
+  wire overflow_neg =  v_sum[8] && ~v_sum[7];
+  wire signed [7:0] v_out = overflow_pos ? 8'sd127 :
+                            overflow_neg ? -8'sd128 : v_sum[7:0];
 
   // ---------------------------------------------------------------------------
-  // Sign-extended velocity for position update (6-bit -> 13-bit)
+  // Sign-extended velocity for position update (8-bit -> 13-bit)
   // ---------------------------------------------------------------------------
-  wire signed [12:0] vAX_ext = {{7{vAX[5]}}, vAX};
-  wire signed [12:0] vAY_ext = {{7{vAY[5]}}, vAY};
-  wire signed [12:0] vBX_ext = {{7{vBX[5]}}, vBX};
-  wire signed [12:0] vBY_ext = {{7{vBY[5]}}, vBY};
-  wire signed [12:0] vCX_ext = {{7{vCX[5]}}, vCX};
-  wire signed [12:0] vCY_ext = {{7{vCY[5]}}, vCY};
+  wire signed [12:0] vAX_ext = {{5{vAX[7]}}, vAX};
+  wire signed [12:0] vAY_ext = {{5{vAY[7]}}, vAY};
+  wire signed [12:0] vBX_ext = {{5{vBX[7]}}, vBX};
+  wire signed [12:0] vBY_ext = {{5{vBY[7]}}, vBY};
+  wire signed [12:0] vCX_ext = {{5{vCX[7]}}, vCX};
+  wire signed [12:0] vCY_ext = {{5{vCY[7]}}, vCY};
 
   // ---------------------------------------------------------------------------
   // Sequential logic
@@ -292,9 +295,13 @@ module gravity (
       pBX <= INIT_BX;  pBY <= INIT_BY;
       pCX <= INIT_CX;  pCY <= INIT_CY;
 
-      vAX <= 6'sd0;  vAY <= 6'sd0;
-      vBX <= 6'sd0;  vBY <= 6'sd0;
-      vCX <= 6'sd0;  vCY <= 6'sd0;
+      // CCW tangential velocities ≈ orbital speed for amag=2 at r≈100px
+      // v_orb = sqrt(r·a) = sqrt(100 * 2/8)·8 = 40  (in 1/8 px/frame units)
+      // Directions from COM=(320,253): A→right, B→up-right, C→down-right
+      // Sum vx = 48-24-24 = 0, sum vy = 0-42+42 = 0 (momentum conserved)
+      vAX <=  8'sd48;  vAY <=  8'sd0;
+      vBX <= -8'sd24;  vBY <= -8'sd42;
+      vCX <= -8'sd24;  vCY <=  8'sd42;
 
       rel          <= 3'd0;
       axis         <= 1'b0;
