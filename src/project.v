@@ -7,6 +7,10 @@
 // Three planets (A, B, C) attract each other using a simplified gravity model
 // based on Manhattan distance. Physics are computed during VGA blanking intervals
 // using a time-multiplexed micro-scheduler to minimize gate count.
+/*
+ * Copyright (c) 2024 Uri Shaked
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 `default_nettype none
 
