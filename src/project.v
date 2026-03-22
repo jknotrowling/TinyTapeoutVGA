@@ -84,29 +84,14 @@ module renderer (
   wire hline = (pix_y == 10'd80) | (pix_y == 10'd130) | (pix_y == 10'd196)
              | (pix_y == 10'd294) | (pix_y == 10'd450) | (pix_y == 10'd479);
 
-  // Vertical lines: share intermediate products to reduce adders
-  // OPT: Factor common sub-expressions across multiplications
+  // Vertical lines (v1 dropped to save area)
   wire [17:0] d18 = {8'b0, dy};
 
-  // pk1 = d18*84: (d18<<6)+(d18<<4)+(d18<<2)
-  wire [17:0] pk1 = (d18<<6)+(d18<<4)+(d18<<2);                    // 2 adders
+  wire [17:0] pk3 = (d18<<7)+(d18<<5)+(d18<<4)+(d18<<2);           // d18*180
+  wire [17:0] pk5 = (d18<<8)+(d18<<6)+(d18<<2)+(d18<<1)+d18;       // d18*327
+  wire [17:0] pk7 = (d18<<9)-(d18<<5);                             // d18*480
+  wire [17:0] pk8 = pk7 + (d18<<7);                                // d18*608
 
-  // pk3 = d18*180: pk1 + (d18<<6) + (d18<<5) = 84+64+32 = 180
-  // OPT: reuse pk1 instead of independent 4-term sum (saves 1 adder)
-  wire [17:0] pk3 = pk1 + (d18<<6) + (d18<<5);                     // 2 adders (was 3)
-
-  // pk5 = d18*327: (d18<<8)+(d18<<6)+(d18<<2)+(d18<<1)+d18
-  wire [17:0] pk5 = (d18<<8)+(d18<<6)+(d18<<2)+(d18<<1)+d18;       // 4 adders
-
-  // pk7 = d18*480: (d18<<9)-(d18<<5) since 512-32=480
-  // OPT: 1 subtraction instead of 3-term addition (saves 2 adders)
-  wire [17:0] pk7 = (d18<<9)-(d18<<5);                             // 1 adder (was 3)
-
-  // pk8 = d18*608: pk7 + (d18<<7) since 480+128=608
-  // OPT: chain from pk7 (saves 1 adder)
-  wire [17:0] pk8 = pk7 + (d18<<7);                                // 1 adder (was 2)
-
-  wire [9:0] o1 = {1'b0, pk1[17:9]};
   wire [9:0] o3 = {1'b0, pk3[17:9]};
   wire [9:0] o5 = {1'b0, pk5[17:9]} + 10'd8;
   wire [9:0] o7 = pk7[17:9] + 10'd28;
@@ -114,14 +99,13 @@ module renderer (
   wire [9:0] o9 = pk8[17:9] + {2'b0, dy[9:2]} + 10'd140;
 
   wire v0 = dxg < 10'd2;
-  wire v1 = ((dxg>=o1 ? dxg-o1 : o1-dxg) < 10'd2) & (dy>10'd3);
   wire v3 = ((dxg>=o3 ? dxg-o3 : o3-dxg) < 10'd2) & (dy>10'd5);
   wire v5 = ((dxg>=o5 ? dxg-o5 : o5-dxg) < 10'd2) & (dy>10'd4);
   wire v7 = ((dxg>=o7 ? dxg-o7 : o7-dxg) < 10'd2) & (dy>10'd3);
   wire v8 = ((dxg>=o8 ? dxg-o8 : o8-dxg) < 10'd2) & (dy>10'd3);
   wire v9 = ((dxg>=o9 ? dxg-o9 : o9-dxg) < 10'd2) & (dy>10'd3);
 
-  wire grid_on = below_hz & (hline | v0 | v1 | v3 | v5 | v7 | v8 | v9);
+  wire grid_on = below_hz & (hline | v0 | v3 | v5 | v7 | v8 | v9);
 
   // ---- Planet depth sizing (4 zones) ----
   wire [9:0] cyA = AY[10] ? 10'd0 : AY[9:0];
