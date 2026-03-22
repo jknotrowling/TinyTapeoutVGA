@@ -7,10 +7,6 @@
 // Three planets (A, B, C) attract each other using a simplified gravity model
 // based on Manhattan distance. Physics are computed during VGA blanking intervals
 // using a time-multiplexed micro-scheduler to minimize gate count.
-/*
- * Copyright (c) 2024 Uri Shaked
- * SPDX-License-Identifier: Apache-2.0
- */
 
 `default_nettype none
 
@@ -66,7 +62,7 @@ endmodule
 
 
 // =============================================================================
-// Renderer: grid + planets + depth (all inlined, no sub-modules)
+// Renderer: grid + planets + depth
 // =============================================================================
 module renderer (
   input  wire [9:0]        pix_x,
@@ -79,37 +75,44 @@ module renderer (
   output wire [1:0]        B
 );
 
-  localparam [5:0] C_A  = 6'b11_10_01;
-  localparam [5:0] C_B  = 6'b10_11_10;
-  localparam [5:0] C_C  = 6'b01_01_11;
-  localparam [5:0] C_BG = 6'b00_00_00;
-  localparam [5:0] C_GR = 6'b01_01_01;
-
-  // ---- Perspective grid (inlined) ----
+  // ---- Perspective grid ----
   wire below_hz = pix_y > 10'd80;
   wire [9:0] dy = pix_y - 10'd80;
   wire [9:0] dxg = (pix_x >= 10'd320) ? (pix_x - 10'd320) : (10'd320 - pix_x);
 
+  // Horizontal lines
   wire hline = (pix_y == 10'd80) | (pix_y == 10'd130) | (pix_y == 10'd196)
              | (pix_y == 10'd294) | (pix_y == 10'd450) | (pix_y == 10'd479);
 
-  // Vertical line offsets: K*dy>>9 + spread
-  // Need 18-bit intermediates: max K=736, max dy=399, max product=293664 < 2^18
+  // Vertical lines: share intermediate products to reduce adders
+  // OPT: Factor common sub-expressions across multiplications
   wire [17:0] d18 = {8'b0, dy};
-  wire [17:0] pk1 = (d18<<6)+(d18<<4)+(d18<<2);                    // K=84
-  wire [17:0] pk3 = (d18<<7)+(d18<<5)+(d18<<4)+(d18<<2);           // K=180
-  wire [17:0] pk5 = (d18<<8)+(d18<<6)+(d18<<2)+(d18<<1)+d18;       // K=327
-  wire [17:0] pk7 = (d18<<8)+(d18<<7)+(d18<<6)+(d18<<5);           // K=480
-  wire [17:0] pk8 = (d18<<9)+(d18<<6)+(d18<<5);                    // K=608
 
-  wire [9:0] o1 = pk1[17:9];
-  wire [9:0] o3 = pk3[17:9];
-  wire [9:0] o5 = pk5[17:9] + 10'd8;
+  // pk1 = d18*84: (d18<<6)+(d18<<4)+(d18<<2)
+  wire [17:0] pk1 = (d18<<6)+(d18<<4)+(d18<<2);                    // 2 adders
+
+  // pk3 = d18*180: pk1 + (d18<<6) + (d18<<5) = 84+64+32 = 180
+  // OPT: reuse pk1 instead of independent 4-term sum (saves 1 adder)
+  wire [17:0] pk3 = pk1 + (d18<<6) + (d18<<5);                     // 2 adders (was 3)
+
+  // pk5 = d18*327: (d18<<8)+(d18<<6)+(d18<<2)+(d18<<1)+d18
+  wire [17:0] pk5 = (d18<<8)+(d18<<6)+(d18<<2)+(d18<<1)+d18;       // 4 adders
+
+  // pk7 = d18*480: (d18<<9)-(d18<<5) since 512-32=480
+  // OPT: 1 subtraction instead of 3-term addition (saves 2 adders)
+  wire [17:0] pk7 = (d18<<9)-(d18<<5);                             // 1 adder (was 3)
+
+  // pk8 = d18*608: pk7 + (d18<<7) since 480+128=608
+  // OPT: chain from pk7 (saves 1 adder)
+  wire [17:0] pk8 = pk7 + (d18<<7);                                // 1 adder (was 2)
+
+  wire [9:0] o1 = {1'b0, pk1[17:9]};
+  wire [9:0] o3 = {1'b0, pk3[17:9]};
+  wire [9:0] o5 = {1'b0, pk5[17:9]} + 10'd8;
   wire [9:0] o7 = pk7[17:9] + 10'd28;
   wire [9:0] o8 = pk8[17:9] + 10'd80;
-  wire [9:0] o9 = pk8[17:9] + {2'b0, dy[9:2]} + 10'd140; // extra (dy<<7)>>9 = dy>>2
+  wire [9:0] o9 = pk8[17:9] + {2'b0, dy[9:2]} + 10'd140;
 
-  // Hit: |dxg - offset| < 2
   wire v0 = dxg < 10'd2;
   wire v1 = ((dxg>=o1 ? dxg-o1 : o1-dxg) < 10'd2) & (dy>10'd3);
   wire v3 = ((dxg>=o3 ? dxg-o3 : o3-dxg) < 10'd2) & (dy>10'd5);
@@ -120,10 +123,14 @@ module renderer (
 
   wire grid_on = below_hz & (hline | v0 | v1 | v3 | v5 | v7 | v8 | v9);
 
-  // ---- Planet depth sizing (4 zones, inline) ----
-  wire [1:0] zA = AY[10] ? 2'd0 : AY[8:7];
-  wire [1:0] zB = BY[10] ? 2'd0 : BY[8:7];
-  wire [1:0] zC = CY[10] ? 2'd0 : CY[8:7];
+  // ---- Planet depth sizing (4 zones) ----
+  wire [9:0] cyA = AY[10] ? 10'd0 : AY[9:0];
+  wire [9:0] cyB = BY[10] ? 10'd0 : BY[9:0];
+  wire [9:0] cyC = CY[10] ? 10'd0 : CY[9:0];
+
+  wire [1:0] zA = cyA[8:7];
+  wire [1:0] zB = cyB[8:7];
+  wire [1:0] zC = cyC[8:7];
 
   wire [3:0] hfA = (zA==0)?4'd5:(zA==1)?4'd8:(zA==2)?4'd11:4'd14;
   wire [4:0] dmA = (zA==0)?5'd7:(zA==1)?5'd10:(zA==2)?5'd14:5'd18;
@@ -132,7 +139,7 @@ module renderer (
   wire [3:0] hfC = (zC==0)?4'd5:(zC==1)?4'd8:(zC==2)?4'd11:4'd14;
   wire [4:0] dmC = (zC==0)?5'd7:(zC==1)?5'd10:(zC==2)?5'd14:5'd18;
 
-  // ---- Planet hit tests (narrowed to 5-bit after early reject) ----
+  // ---- Planet hit tests ----
   wire signed [10:0] spx = {1'b0, pix_x};
   wire signed [10:0] spy = {1'b0, pix_y};
 
@@ -140,7 +147,6 @@ module renderer (
   wire signed [10:0] dxB = spx - BX, dyB = spy - BY;
   wire signed [10:0] dxC = spx - CX, dyC = spy - CY;
 
-  // Abs via sign flip (10-bit output, but we only care about low 5 bits if high bits=0)
   wire [9:0] ax = dxA[10] ? -dxA[9:0] : dxA[9:0];
   wire [9:0] ay = dyA[10] ? -dyA[9:0] : dyA[9:0];
   wire [9:0] bx = dxB[10] ? -dxB[9:0] : dxB[9:0];
@@ -148,18 +154,17 @@ module renderer (
   wire [9:0] cx = dxC[10] ? -dxC[9:0] : dxC[9:0];
   wire [9:0] cy = dyC[10] ? -dyC[9:0] : dyC[9:0];
 
-  // Early reject: if any high bit set, distance > 31 > max planet radius (18)
-  wire bbA = ~|{ax[9:5], ay[9:5]};
-  wire bbB = ~|{bx[9:5], by[9:5]};
-  wire bbC = ~|{cx[9:5], cy[9:5]};
+  wire eA = ~|{ax[9:5], ay[9:5]};
+  wire eB = ~|{bx[9:5], by[9:5]};
+  wire eC = ~|{cx[9:5], cy[9:5]};
 
   wire [5:0] mA = ax[4:0] + ay[4:0];
   wire [5:0] mB = bx[4:0] + by[4:0];
   wire [5:0] mC = cx[4:0] + cy[4:0];
 
-  wire hitA = bbA & (ax[4:0]<{1'b0,hfA}) & (ay[4:0]<{1'b0,hfA}) & (mA<{1'b0,dmA});
-  wire hitB = bbB & (bx[4:0]<{1'b0,hfB}) & (by[4:0]<{1'b0,hfB}) & (mB<{1'b0,dmB});
-  wire hitC = bbC & (cx[4:0]<{1'b0,hfC}) & (cy[4:0]<{1'b0,hfC}) & (mC<{1'b0,dmC});
+  wire hitA = eA & (ax[4:0]<{1'b0,hfA}) & (ay[4:0]<{1'b0,hfA}) & (mA<{1'b0,dmA});
+  wire hitB = eB & (bx[4:0]<{1'b0,hfB}) & (by[4:0]<{1'b0,hfB}) & (mB<{1'b0,dmB});
+  wire hitC = eC & (cx[4:0]<{1'b0,hfC}) & (cy[4:0]<{1'b0,hfC}) & (mC<{1'b0,dmC});
 
   // Depth-sorted color mux
   wire afb = AY >= BY, afc = AY >= CY, bfc = BY >= CY;
@@ -167,7 +172,11 @@ module renderer (
   wire bt = hitB & ~at & (~hitC|bfc);
   wire ct = hitC & ~at & ~bt;
 
-  wire [5:0] color = at ? C_A : bt ? C_B : ct ? C_C : grid_on ? C_GR : C_BG;
+  wire [5:0] color = at      ? 6'b11_10_01 :
+                     bt      ? 6'b10_11_10 :
+                     ct      ? 6'b01_01_11 :
+                     grid_on ? 6'b01_01_01 : 6'b00_00_00;
+
   assign {R, G, B} = color;
 
 endmodule
@@ -193,48 +202,42 @@ module gravity (
   assign CX = pCX[13:3]; assign CY = pCY[13:3];
 
   reg signed [7:0] vAX, vAY, vBX, vBY, vCX, vCY;
-  reg [15:0] lfsr;
+  reg [7:0] lfsr;
   reg [3:0]  flash_ctr;
+  reg        collide_flag;
   wire flashing = |flash_ctr;
   assign flash = flashing;
 
-  // Collision detection (inline abs, no modules)
-  wire signed [10:0] cdABx = AX-BX, cdABy = AY-BY;
-  wire signed [10:0] cdACx = AX-CX, cdACy = AY-CY;
-  wire signed [10:0] cdBCx = BX-CX, cdBCy = BY-CY;
-  wire [10:0] aABx = cdABx[10]?-cdABx:cdABx, aABy = cdABy[10]?-cdABy:cdABy;
-  wire [10:0] aACx = cdACx[10]?-cdACx:cdACx, aACy = cdACy[10]?-cdACy:cdACy;
-  wire [10:0] aBCx = cdBCx[10]?-cdBCx:cdBCx, aBCy = cdBCy[10]?-cdBCy:cdBCy;
-  wire collide = ((aABx+aABy)<11'd12) | ((aACx+aACy)<11'd12) | ((aBCx+aBCy)<11'd12);
-
-  // Random positions from LFSR
-  wire [10:0] rAX = 11'd100+{2'b0,lfsr[8:0]>9'd440 ? 9'd440 : lfsr[8:0]};
-  wire [10:0] rAY = 11'd100+{3'b0,lfsr[15:8]};
-  wire [10:0] rBX = 11'd100+{2'b0,{lfsr[5:0],lfsr[15:13]}>9'd440 ? 9'd440 : {lfsr[5:0],lfsr[15:13]}};
-  wire [10:0] rBY = 11'd100+{3'b0,{lfsr[3:0],lfsr[11:8]}};
-  wire [10:0] rCX = 11'd100+{2'b0,{lfsr[12:7],lfsr[2:0]}>9'd440 ? 9'd440 : {lfsr[12:7],lfsr[2:0]}};
-  wire [10:0] rCY = 11'd100+{3'b0,{lfsr[1:0],lfsr[13:8]}};
-
-  // Sweep state
-  reg [2:0] rel;
-  reg       axis, sweep_active;
+  // OPT: Replace separate rel[2:0]+axis with single step[3:0] counter
+  // step[0] = axis, step[3:1] = rel, step[3:2] = p_idx
+  reg [3:0]  step;
+  reg        sweep_active;
   wire do_step = blanking & sweep_active;
 
-  wire [1:0] p_idx = (rel<3'd2)?2'd0:(rel<3'd4)?2'd1:2'd2;
-  wire [1:0] q_idx = (rel==3'd0)?2'd1:(rel==3'd1)?2'd2:
-                     (rel==3'd2)?2'd0:(rel==3'd3)?2'd2:
-                     (rel==3'd4)?2'd0:2'd1;
+  // OPT: p_idx = rel[2:1] = step[3:2] -- direct bit-slice, no comparators
+  wire [1:0] p_idx = step[3:2];
+
+  // OPT: q_idx via direct gate logic on step bits (replaces 5-way mux chain)
+  // Derived from the pair enumeration: AB,AC,BA,BC,CA,CB
+  wire [1:0] q_idx;
+  assign q_idx[1] = step[1] & (~step[3] | step[2]);
+  assign q_idx[0] = ~step[2] & ~(step[1] ^ step[3]);
 
   wire signed [10:0] PX=(p_idx==0)?AX:(p_idx==1)?BX:CX;
   wire signed [10:0] PY=(p_idx==0)?AY:(p_idx==1)?BY:CY;
   wire signed [10:0] QX=(q_idx==0)?AX:(q_idx==1)?BX:CX;
   wire signed [10:0] QY=(q_idx==0)?AY:(q_idx==1)?BY:CY;
 
+  // Gravity + collision (shared distance)
   wire signed [10:0] dx = QX-PX;
   wire signed [10:0] dy = QY-PY;
   wire [9:0] adx = dx[10]?-dx[9:0]:dx[9:0];
   wire [9:0] ady = dy[10]?-dy[9:0]:dy[9:0];
   wire [10:0] manh = {1'b0,adx}+{1'b0,ady};
+
+  // OPT: Replace 11-bit comparator with narrow bit checks
+  // manh < 12 iff upper bits all zero AND lower nibble not 11xx
+  wire pair_close = ~|manh[10:4] & ~(manh[3] & manh[2]) & ~step[0];
 
   wire [2:0] amag = |manh[10:8]?3'd0:manh[7]?3'd2:manh[6]?3'd4:3'd6;
 
@@ -242,12 +245,14 @@ module gravity (
   wire signed [7:0] dvx = $signed(({5'b0,amag}^{8{sx}}))+$signed({7'd0,sx});
   wire signed [7:0] dvy = $signed(({5'b0,amag}^{8{sy}}))+$signed({7'd0,sy});
 
-  wire signed [7:0] v_in = axis?((p_idx==0)?vAY:(p_idx==1)?vBY:vCY)
-                                :((p_idx==0)?vAX:(p_idx==1)?vBX:vCX);
-  wire signed [7:0] dv_in = axis?dvy:dvx;
+  wire signed [7:0] v_in = step[0]?((p_idx==0)?vAY:(p_idx==1)?vBY:vCY)
+                                   :((p_idx==0)?vAX:(p_idx==1)?vBX:vCX);
+  wire signed [7:0] dv_in = step[0]?dvy:dvx;
   wire signed [8:0] v_sum = {v_in[7],v_in}+{dv_in[7],dv_in};
-  wire signed [7:0] v_out = (~v_sum[8]&v_sum[7])?8'sd127:
-                            (v_sum[8]&~v_sum[7])?-8'sd128:v_sum[7:0];
+
+  // OPT: Simpler saturation using XOR overflow detect
+  wire v_ov = v_sum[8] ^ v_sum[7];
+  wire signed [7:0] v_out = v_ov ? {v_sum[8], {7{~v_sum[8]}}} : v_sum[7:0];
 
   wire signed [13:0] vAXe={{6{vAX[7]}},vAX}, vAYe={{6{vAY[7]}},vAY};
   wire signed [13:0] vBXe={{6{vBX[7]}},vBX}, vBYe={{6{vBY[7]}},vBY};
@@ -261,61 +266,75 @@ module gravity (
       vAX<=8'sd48;  vAY<=8'sd0;
       vBX<=-8'sd24; vBY<=-8'sd42;
       vCX<=-8'sd24; vCY<=8'sd42;
-      rel<=0; axis<=0; sweep_active<=0;
-      flash_ctr<=0; lfsr<=16'hACE1;
+      step<=0; sweep_active<=0;
+      flash_ctr<=0; lfsr<=8'hA5;
+      collide_flag<=0;
     end else begin
-      lfsr <= {lfsr[14:0], lfsr[15]^lfsr[14]^lfsr[12]^lfsr[3]};
+      lfsr <= {lfsr[6:0], lfsr[7]^lfsr[5]^lfsr[4]^lfsr[3]};
 
       if (flashing & frame_tick) begin
         flash_ctr <= flash_ctr - 4'd1;
         if (flash_ctr == 4'd1) begin
-          pAX<={rAX,3'b0}; pAY<={rAY,3'b0};
-          pBX<={rBX,3'b0}; pBY<={rBY,3'b0};
-          pCX<={rCX,3'b0}; pCY<={rCY,3'b0};
+          pAX<={3'b0,lfsr[7:0],3'b0}+{11'd80,3'b0};
+          pAY<={3'b0,lfsr[4:0],lfsr[7:5],3'b0}+{11'd100,3'b0};
+          pBX<={3'b0,lfsr[3:0],lfsr[7:4],3'b0}+{11'd80,3'b0};
+          pBY<={3'b0,lfsr[6:0],lfsr[7],3'b0}+{11'd100,3'b0};
+          pCX<={3'b0,lfsr[2:0],lfsr[7:3],3'b0}+{11'd80,3'b0};
+          pCY<={3'b0,lfsr[1:0],lfsr[7:2],3'b0}+{11'd100,3'b0};
           vAX<={lfsr[4],lfsr[4],lfsr[4],lfsr[4:0]};
-          vAY<={lfsr[12],lfsr[12],lfsr[12],lfsr[12:8]};
-          vBX<={~lfsr[7],~lfsr[7],~lfsr[7],~lfsr[7:3]};
-          vBY<={lfsr[2],lfsr[2],lfsr[2],lfsr[2:0],lfsr[15],lfsr[14]};
+          vAY<={lfsr[7],lfsr[7],lfsr[7],lfsr[7:3]};
+          vBX<={~lfsr[2],~lfsr[2],~lfsr[2],~lfsr[2:0],lfsr[7],lfsr[6]};
+          vBY<={lfsr[0],lfsr[0],lfsr[0],lfsr[0],lfsr[7:4]};
           vCX<=-$signed({lfsr[4],lfsr[4],lfsr[4],lfsr[4:0]})
-               -$signed({~lfsr[7],~lfsr[7],~lfsr[7],~lfsr[7:3]});
-          vCY<=-$signed({lfsr[12],lfsr[12],lfsr[12],lfsr[12:8]})
-               -$signed({lfsr[2],lfsr[2],lfsr[2],lfsr[2:0],lfsr[15],lfsr[14]});
-          rel<=0; axis<=0; sweep_active<=0;
+               -$signed({~lfsr[2],~lfsr[2],~lfsr[2],~lfsr[2:0],lfsr[7],lfsr[6]});
+          vCY<=-$signed({lfsr[7],lfsr[7],lfsr[7],lfsr[7:3]})
+               -$signed({lfsr[0],lfsr[0],lfsr[0],lfsr[0],lfsr[7:4]});
+          step<=0; sweep_active<=0;
+          collide_flag<=0;
         end
       end else if (~flashing) begin
-        if (frame_tick & collide) flash_ctr <= 4'd8;
-        if (frame_tick & ~collide) begin
-          pAX<=pAX+vAXe; pAY<=pAY+vAYe;
-          pBX<=pBX+vBXe; pBY<=pBY+vBYe;
-          pCX<=pCX+vCXe; pCY<=pCY+vCYe;
-          rel<=0; axis<=0; sweep_active<=1;
+        // OPT: Merged frame_tick branches (collide vs normal)
+        if (frame_tick) begin
+          if (collide_flag) begin
+            flash_ctr <= 4'd8;
+            collide_flag <= 0;
+          end else begin
+            pAX<=pAX+vAXe; pAY<=pAY+vAYe;
+            pBX<=pBX+vBXe; pBY<=pBY+vBYe;
+            pCX<=pCX+vCXe; pCY<=pCY+vCYe;
+            sweep_active<=1;
+          end
+          step<=0;
+          collide_flag<=0;
         end
         // Wrapping
         if (~frame_tick) begin
-          if (AX<-11'sd40)      pAX<=pAX+14'sd5760;
-          else if (AX>11'sd680) pAX<=pAX-14'sd5760;
-          if (BX<-11'sd40)      pBX<=pBX+14'sd5760;
-          else if (BX>11'sd680) pBX<=pBX-14'sd5760;
-          if (CX<-11'sd40)      pCX<=pCX+14'sd5760;
-          else if (CX>11'sd680) pCX<=pCX-14'sd5760;
-          if (AY<-11'sd40)      pAY<=pAY+14'sd4480;
-          else if (AY>11'sd520) pAY<=pAY-14'sd4480;
-          if (BY<-11'sd40)      pBY<=pBY+14'sd4480;
-          else if (BY>11'sd520) pBY<=pBY-14'sd4480;
-          if (CY<-11'sd40)      pCY<=pCY+14'sd4480;
-          else if (CY>11'sd520) pCY<=pCY-14'sd4480;
+          if (AX[10])          pAX<=pAX+14'sd5760;
+          else if (AX[9])      pAX<=pAX-14'sd5760;
+          if (BX[10])          pBX<=pBX+14'sd5760;
+          else if (BX[9])      pBX<=pBX-14'sd5760;
+          if (CX[10])          pCX<=pCX+14'sd5760;
+          else if (CX[9])      pCX<=pCX-14'sd5760;
+          if (AY[10])          pAY<=pAY+14'sd4480;
+          else if (AY[9])      pAY<=pAY-14'sd4480;
+          if (BY[10])          pBY<=pBY+14'sd4480;
+          else if (BY[9])      pBY<=pBY-14'sd4480;
+          if (CY[10])          pCY<=pCY+14'sd4480;
+          else if (CY[9])      pCY<=pCY-14'sd4480;
         end
+        // Gravity micro-steps + collision
         if (do_step) begin
+          if (pair_close) collide_flag <= 1;
           case(p_idx)
-            2'd0: if(~axis) vAX<=v_out; else vAY<=v_out;
-            2'd1: if(~axis) vBX<=v_out; else vBY<=v_out;
-            2'd2: if(~axis) vCX<=v_out; else vCY<=v_out;
+            2'd0: if(~step[0]) vAX<=v_out; else vAY<=v_out;
+            2'd1: if(~step[0]) vBX<=v_out; else vBY<=v_out;
+            2'd2: if(~step[0]) vCX<=v_out; else vCY<=v_out;
             default:;
           endcase
-          if (rel==3'd5 & axis) begin
-            sweep_active<=0; axis<=0; rel<=0;
-          end else if (~axis) axis<=1;
-          else begin axis<=0; rel<=rel+3'd1; end
+          // OPT: Simple increment + terminal check replaces dual-counter FSM
+          if (step == 4'd11) begin
+            sweep_active<=0; step<=0;
+          end else step <= step + 4'd1;
         end
       end
     end
